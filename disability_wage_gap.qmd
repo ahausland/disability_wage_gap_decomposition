@@ -1,0 +1,662 @@
+---
+title: "disability_wage_gap"
+format: html
+---
+
+# Disability Wage Gap
+
+# Load and Prepare Data
+
+```{r libraries}
+library(tidyverse)
+library(haven)
+library(ggplot2)
+library(MetBrewer)
+library(oaxaca)
+library(stargazer)
+```
+
+```{r full-dataset, include = FALSE}
+# load full dataset
+# contains employed adults ages 18-65
+df_acs = read_dta('/Users/alexis/Documents/Grad School/ECON 185/final_project/data/usa_00011.dta',
+                  col_select = -c("sample", "pernum", "raced", "educd","degfield2", "degfield2d", 
+                                  "empstatd", "incother", "classwkr", "availble", "schltype", "workedyr")
+                  )
+```
+
+Full dataset loaded as `df_acs` using `read_dta()`.
+
+## Sample Restrictions
+
+```{r sample-restrictions}
+# sample restrictions
+df_acs = df_acs %>%
+  filter(age > 24 & age < 64) %>%             # Focus on working age
+  filter(incwage > 0 & incwage < 999998) %>%  # Exclude non-earners/missing
+  filter(uhrswork >= 30 & uhrswork < 99) %>%  # Exclude people who didn't work full-time
+  filter(classwkrd != 10) %>%                 # Exclude self-employed
+  filter(wkswork2 >= 3)                       # Exclude people who worked less than 27 weeks last year
+
+dim(df_acs)
+```
+
+```{r, include = FALSE}
+gc()
+```
+
+
+## Add/Modify Variables
+
+```{r make-into-integers}
+# make doubles into integers for better memory space
+df_acs$year = as.integer(df_acs$year)
+df_acs$age = as.integer(df_acs$age)
+df_acs$educ = as.integer(df_acs$educ)
+df_acs$uhrswork = as.integer(df_acs$uhrswork)
+df_acs$wkswork2 = as.integer(df_acs$wkswork2)
+```
+
+```{r, include = FALSE}
+gc()
+```
+
+```{r make-into-factors}
+# make doubles into factors
+df_acs$ind1990 = as.factor(df_acs$ind1990)
+df_acs$statefip = as.factor(df_acs$statefip)
+```
+
+```{r, include = FALSE}
+gc()
+```
+
+```{r binary-female}
+# binary gender variable
+df_acs$female = ifelse(df_acs$sex == 2, 1L, 0L)
+
+# move column to after sex
+df_acs = df_acs %>% 
+  relocate(female, .after = sex)
+```
+
+```{r log-wages}
+# log wages
+df_acs$log_wage = log(df_acs$incwage)
+
+# move column to after incwage
+df_acs = df_acs %>% 
+  relocate(log_wage, .after = incwage)
+```
+
+```{r}
+# recode disability variables to 0 and 1
+df_acs$diffrem = df_acs$diffrem - 1
+df_acs$diffphys = df_acs$diffphys - 1
+df_acs$diffmob = df_acs$diffmob - 1
+df_acs$diffcare = df_acs$diffcare - 1
+df_acs$diffsens = df_acs$diffsens - 1
+df_acs$diffeye = df_acs$diffeye - 1
+df_acs$diffhear = df_acs$diffhear - 1
+```
+
+```{r binary-disability}
+# any disability binary
+df_acs$disability = ifelse(
+  df_acs$diffrem == 1 | 
+  df_acs$diffphys == 1 | 
+  df_acs$diffmob == 1 | 
+  df_acs$diffcare == 1 | 
+  df_acs$diffsens == 1 | 
+  df_acs$diffeye == 1 | 
+  df_acs$diffhear == 1, 
+  1L, 0L
+)
+```
+
+```{r}
+# number of disabilities
+df_acs$n_disabilities = df_acs$diffrem + df_acs$diffphys + df_acs$diffmob + df_acs$diffcare + df_acs$diffeye + df_acs$diffhear
+
+# disability type
+df_acs$disability_type = case_when(
+  df_acs$diffrem == 1 ~ "cognitive",
+  df_acs$diffphys == 1 ~ "ambulatory",
+  df_acs$diffmob == 1 ~ "independent living",
+  df_acs$diffcare == 1 ~ "self-care",
+  # df_acs$diffsens == 1 ~ "", 
+  df_acs$diffeye == 1 & df_acs$diffhear == 0 ~ "vision only",  
+  df_acs$diffhear == 1 & df_acs$diffeye == 0 ~ "hearing only",
+   df_acs$n_disabilities > 1 ~ "multiple",
+  df_acs$n_disabilities == 0 ~ "none"
+)
+```
+
+```{r educ-in-years}
+# education in years
+# midpoint used for ranges
+educ_map = c(
+  '0' = 0, # N/A or no schooling
+  '1' = 2, # Nursery school to grade 4
+  '2' = 6.5, # Grade 5, 6, 7, or 8
+  '3' = 9, # Grade 9
+  '4' = 10, # Grade 10
+  '5' = 11, # Grade 11
+  '6' = 12, # Grade 12
+  '7' = 13, # 1 year of college
+  '8' = 14, # 2 years of college
+  '9' = 15, # 3 years of college
+  '10' = 16, # 4 years of college
+  '11' = 18 # 5+ years of college
+)
+
+df_acs$educ_years = educ_map[as.character(df_acs$educ)]
+
+# move column to after educ
+df_acs = df_acs %>% 
+  relocate(educ_years, .after = educ)
+```
+
+```{r binary-married}
+# binary married
+df_acs$married = ifelse(df_acs$marst == 1, # married and spouse present
+                        1L, 0L)
+```
+
+```{r work-from-home}
+# work from home
+df_acs$wfh = ifelse(df_acs$tranwork == 80, 1L, 0L)
+```
+
+# Descriptive Statistics
+
+```{r summary-stats}
+# summary stats
+df_acs %>% 
+  group_by(disability) %>% 
+  summarise(
+    n = n(),
+    mean_logwage = mean(log_wage),
+    sd_logwage = sd(log_wage),
+    mean_educyears = mean(educ_years),
+    sd_educyears = sd(educ_years),
+    mean_age = mean(age),
+    sd_age = sd(age),
+    .groups = "drop"
+  ) %>% 
+  round(2)
+
+df_acs %>% 
+  group_by(disability) %>% 
+  summarise(
+    mean_hours = mean(uhrswork),
+    sd_hours = sd(uhrswork),
+    mean_married = mean(married),
+    sd_married = sd(married),
+    mean_wfh = mean(wfh),
+    sd_wfh = sd(wfh),
+    mean_female = mean(female),
+    sd_female = sd(female),
+    .groups = "drop"
+  ) %>% 
+  round(2)
+```
+
+```{r}
+# year distribution
+df_acs %>% 
+  group_by(year, disability) %>% 
+  summarise(
+    count = n(),
+    .groups = "drop"
+  ) %>% 
+  ggplot(aes(x = factor(year), y = count, fill = factor(disability))) + 
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("#447861", "#b1a1cc")) + 
+  labs(
+    title = "Distribution of Disabled and Non-Disabled",
+    y = "Count",
+    x = "Year",
+    fill = "Disability"
+  ) +
+  theme_linedraw() +
+  theme(text = element_text(family = "serif"))
+```
+
+```{r}
+df_acs %>% 
+  group_by(disability_type) %>% 
+  summarise(n = n())
+```
+
+
+```{r}
+# work from home
+df_acs %>% 
+  group_by(disability, year) %>% 
+  summarise(
+    wfh = sum(wfh), 
+    prop = (sum(wfh) / n()) * 100
+  ) %>% 
+  pivot_wider(
+    names_from = disability,
+    names_glue = "{.value}_{disability}",
+    values_from = c(wfh, prop)
+  ) %>% 
+  round(2)
+
+df_acs %>% 
+  group_by(year) %>% 
+  summarise(
+    n = sum(wfh),
+    prop = (sum(wfh) / n()) * 100
+  ) %>% 
+  round(2)
+```
+
+```{r}
+# remote work over time
+df_acs %>% 
+  ggplot(aes(x = factor(year), 
+             fill = factor(ifelse(wfh == 0, "Non-Remote", ifelse(disability == 1, "Disabled Remote", "Non-Disabled Remote")))
+  )) + 
+  geom_bar() +
+  scale_fill_manual(values = c("#c44d76", "#b1a1cc", "#447861")) + 
+  labs(
+    title = "Distribution of Remote Work",
+    y = "Count",
+    x = "Year",
+    fill = "Category"
+  ) +
+  theme_linedraw() +
+  theme(text = element_text(family = "serif"))
+```
+
+
+```{r}
+# gender summary stats
+# female
+df_acs %>% 
+  filter(female == 1) %>% 
+  group_by(disability) %>% 
+  summarise(
+    n = n(),
+    mean_logwage = mean(log_wage),
+    sd_logwage = sd(log_wage),
+    mean_educyears = mean(educ_years),
+    sd_educyears = sd(educ_years),
+    mean_age = mean(age),
+    sd_age = sd(age),
+    mean_hours = mean(uhrswork),
+    sd_hours = sd(uhrswork),
+    mean_married = mean(married),
+    sd_married = sd(married),
+    mean_wfh = mean(wfh),
+    sd_wfh = sd(wfh),
+    mean_female = mean(female),
+    sd_female = sd(female),
+    .groups = "drop"
+  ) %>% 
+  round(2)
+
+# male
+df_acs %>% 
+  filter(female == 0) %>% 
+  group_by(disability) %>% 
+  summarise(
+    n = n(),
+    mean_logwage = mean(log_wage),
+    sd_logwage = sd(log_wage),
+    mean_educyears = mean(educ_years),
+    sd_educyears = sd(educ_years),
+    mean_age = mean(age),
+    sd_age = sd(age),
+    mean_hours = mean(uhrswork),
+    sd_hours = sd(uhrswork),
+    mean_married = mean(married),
+    sd_married = sd(married),
+    mean_wfh = mean(wfh),
+    sd_wfh = sd(wfh),
+    mean_female = mean(female),
+    sd_female = sd(female),
+    .groups = "drop"
+  ) %>% 
+  round(2)
+```
+
+# Linear Regresion
+
+```{r lin-regression}
+mod_female = lm(log_wage ~ disability + age + educ_years + uhrswork + married + statefip + wfh + factor(year), df_acs[df_acs$female == 1, ])
+summary(mod_female)
+
+mod_male = lm(log_wage ~ disability + age + educ_years + uhrswork + married + statefip + wfh + factor(year), df_acs[df_acs$female == 0, ])
+summary(mod_male)
+```
+
+```{r lin-regression-interaction}
+mod_int_female = lm(log_wage ~ disability*(educ_years + age + uhrswork + wfh) + married + statefip + factor(year), df_acs[df_acs$female == 1, ])
+summary(mod_int_female)
+
+mod_int_male = lm(log_wage ~ disability*(educ_years + age + uhrswork + wfh) + married + statefip + factor(year), df_acs[df_acs$female == 0, ])
+summary(mod_int_male)
+```
+
+```{r latex-table, include=FALSE}
+stargazer(mod_int_female, mod_int_male, omit = c("statefip", "factor\\(year\\)"), omit.labels = c("State fixed effects", "Year fixed effects"), type = "text")
+stargazer(mod_int_female, mod_int_male, 
+          omit = c("statefip", "factor\\(year\\)"), 
+          omit.labels = c("State fixed effects", "Year fixed effects"), 
+          covariate.labels = c(
+            "Disability",
+            "Education (years)",
+            "Age",
+            "Usual hours worked",
+            "Work from home",
+            "Married",
+            "Disability × Education",
+            "Disability × Age",
+            "Disability × Hours worked",
+            "Disability × Work from home"
+          ), 
+          type = "latex")
+```
+
+# Oaxaca-Blinder Decomposition
+
+```{r}
+# conserving computer memory
+# delete linear regression models
+rm(mod_female, mod_male, mod_int_female, mod_int_male)
+
+# keep only necessary columns for oaxaca decomposition
+cols_keep = c("year", "log_wage", "age", "educ_years", "uhrswork", "female", "married", "wfh", "ind1990", "disability", "statefip", "n_disabilities", "disability_type")
+df_acs = df_acs[, cols_keep]
+
+# make sure non-disabled are reference group A
+df_acs$disability = factor(df_acs$disability, levels = c(0, 1))
+```
+
+```{r, include = FALSE}
+gc(); gc()
+```
+
+
+```{r oaxaca-decomposition, message=FALSE, warning=FALSE}
+years = unique(df_acs$year)
+detailed_results = list()
+
+for (yr in years) {
+  # subset to the specific year
+  data_year = df_acs[df_acs$year == yr, ]
+  
+  # oaxaca decomposition
+  res = oaxaca(log_wage ~ age + educ_years + uhrswork + female + married + statefip + wfh | disability, 
+                data = data_year, R = 10)
+  
+  # pull variables from the reference group (Index 1 = Group A)
+  vars_w = res$twofold$variables[[1]]
+  
+  # extract specific explained components
+  explained_vals = vars_w[, "coef(explained)"]
+  
+  # sum the unexplained components into one total
+  unexplained_total = sum(vars_w[, "coef(unexplained)"])
+  
+  # use grepl to find and sum all dummy variables for a category
+  sum_category = function(name, vec) {
+  relevant_rows = vec[grepl(paste0("^", name), names(vec))]
+  return(sum(relevant_rows, na.rm = TRUE))
+  }
+  
+  # build the data frame for this specific year
+  df_year_stack = data.frame(
+    year = yr,
+    component = c("Age", "Education", "Hours", "Female", "Marriage Status", "State", "Work From Home","Unexplained"),
+    log_points = c(
+      explained_vals["age"],
+      explained_vals["educ_years"],
+      explained_vals["uhrswork"],
+      explained_vals["female"],
+      explained_vals["married"],
+      sum_category("statefip", explained_vals),
+      explained_vals["wfh"],
+      unexplained_total
+    )
+  )
+
+  # add results to master list
+  detailed_results[[as.character(yr)]] = df_year_stack
+  
+  # delete used variables for better RAM performance
+  rm(res, data_year, vars_w, explained_vals, unexplained_total, df_year_stack)
+  gc()
+}
+
+# df for ggplot visualization
+plot_df = do.call(rbind, detailed_results)
+
+# convert log points to percent difference
+plot_df$percent_diff = 100 * plot_df$log_points
+```
+
+```{r female-decomposition, message=FALSE, warning=FALSE}
+female_results = list()
+
+for (yr in years) {
+  # subset to the specific year
+  data_year = df_acs[df_acs$year == yr & df_acs$female == 1, ]
+  
+  # oaxaca decomposition
+  res = oaxaca(log_wage ~ age + educ_years + uhrswork + married + statefip + wfh | disability, 
+                data = data_year, R = 10)
+  
+  # pull variables from the reference group (Index 1 = Group A)
+  vars_w = res$twofold$variables[[1]]
+  
+  # extract specific explained components
+  explained_vals = vars_w[, "coef(explained)"]
+  
+  # sum the unexplained components into one total
+  unexplained_total = sum(vars_w[, "coef(unexplained)"])
+  
+  # use grepl to find and sum all dummy variables for a category
+  sum_category = function(name, vec) {
+  relevant_rows = vec[grepl(paste0("^", name), names(vec))]
+  return(sum(relevant_rows, na.rm = TRUE))
+  }
+  
+  # build the data frame for this specific year
+  df_year_stack = data.frame(
+    year = yr,
+    component = c("Age", "Education", "Hours", "Marriage Status", "State", "Work From Home", "Unexplained"),
+    log_points = c(
+      explained_vals["age"],
+      explained_vals["educ_years"],
+      explained_vals["uhrswork"],
+      explained_vals["married"],
+      sum_category("statefip", explained_vals),
+      explained_vals["wfh"],
+      unexplained_total
+    )
+  )
+
+  # add results to master list
+  female_results[[as.character(yr)]] = df_year_stack
+  
+  # delete used variables for better RAM performance
+  rm(res, data_year, vars_w, explained_vals, unexplained_total, df_year_stack)
+  gc()
+}
+
+# df for ggplot visualization
+female_plot_df = do.call(rbind, female_results)
+
+# convert log points to percent difference
+female_plot_df$percent_diff = 100 * female_plot_df$log_points
+```
+
+```{r male-decomposition, message=FALSE, warning=FALSE}
+male_results = list()
+
+for (yr in years) {
+  # subset to the specific year
+  data_year = df_acs[df_acs$year == yr & df_acs$female == 0, ]
+  
+  # oaxaca decomposition
+  res = oaxaca(log_wage ~ age + educ_years + uhrswork + married + statefip + wfh | disability, 
+                data = data_year, R = 10)
+  
+  # pull variables from the reference group (Index 1 = Group A)
+  vars_w = res$twofold$variables[[1]]
+  
+  # extract specific explained components
+  explained_vals = vars_w[, "coef(explained)"]
+  
+  # sum the unexplained components into one total
+  unexplained_total = sum(vars_w[, "coef(unexplained)"])
+  
+  # use grepl to find and sum all dummy variables for a category
+  sum_category = function(name, vec) {
+  relevant_rows = vec[grepl(paste0("^", name), names(vec))]
+  return(sum(relevant_rows, na.rm = TRUE))
+  }
+  
+  # build the data frame for this specific year
+  df_year_stack = data.frame(
+    year = yr,
+    component = c("Age", "Education", "Hours", "Marriage Status", "State", "Work From Home", "Unexplained"),
+    log_points = c(
+      explained_vals["age"],
+      explained_vals["educ_years"],
+      explained_vals["uhrswork"],
+      explained_vals["married"],
+      sum_category("statefip", explained_vals),
+      explained_vals["wfh"],
+      unexplained_total
+    )
+  )
+
+  # add results to master list
+  male_results[[as.character(yr)]] = df_year_stack
+  
+  # delete used variables for better RAM performance
+  rm(res, data_year, vars_w, explained_vals, unexplained_total, df_year_stack)
+  gc()
+}
+
+# df for ggplot visualization
+male_plot_df = do.call(rbind, male_results)
+
+# convert log points to percent difference
+male_plot_df$percent_diff = 100 * male_plot_df$log_points
+```
+
+
+```{r}
+# total wage gap each year
+plot_df %>% 
+  group_by(year) %>% 
+  summarise(
+    total_gap = sum(percent_diff)
+  ) %>% 
+  round(2)
+
+female_plot_df %>%
+  group_by(year) %>%
+  summarise(
+    total_gap = sum(percent_diff)
+  ) %>%
+  round(2)
+
+male_plot_df %>%
+  group_by(year) %>%
+  summarise(
+    total_gap = sum(percent_diff)
+  ) %>%
+  round(2)
+```
+
+```{r, include = FALSE}
+# add percentage of wage gap column to oaxaca results
+plot_df = plot_df %>%
+  group_by(year) %>%
+  mutate(percent_gap = (percent_diff / sum(percent_diff)) * 100) %>%
+  ungroup()
+
+female_plot_df = female_plot_df %>%
+  group_by(year) %>%
+  mutate(percent_gap = (percent_diff / sum(percent_diff)) * 100) %>%
+  ungroup()
+
+male_plot_df = male_plot_df %>%
+  group_by(year) %>%
+  mutate(percent_gap = (percent_diff / sum(percent_diff)) * 100) %>%
+  ungroup()
+```
+
+# Visualizations
+
+```{r visualization-all}
+# Daly et al. (2017) style decomposition plot
+plot_df %>% 
+  ggplot(aes(x = factor(year), y = percent_diff, fill = component)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  # geom_hline(yintercept = 0, color = "black", linewidth = 0.3) + # x-axis line
+  
+  # line for total wage gap
+  stat_summary(fun = sum, aes(group = 1), geom = "line", 
+               color = "black", linewidth = 0.8) +
+  stat_summary(fun = sum, aes(group = 1), geom = "point", 
+               color = "black", size = 1.3) +
+  
+  labs(title = "Disability Wage Gap",
+       y = "Percent difference in wages", x = "Year",
+       fill = "Component") +
+  scale_fill_manual(values = met.brewer("Thomas", 8)) + # Palette Options: Thomas, Tara, Signac, Homer2, Hiroshige, Derain
+  theme_linedraw() +
+  theme(text = element_text(family = "serif"))
+```
+
+```{r visualization-female}
+# Daly et al. (2017) style decomposition plot
+female_plot_df %>% 
+  ggplot(aes(x = factor(year), y = percent_diff, fill = component)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  # geom_hline(yintercept = 0, color = "black", linewidth = 0.3) + # x-axis line
+  
+  # line for total wage gap
+  stat_summary(fun = sum, aes(group = 1), geom = "line", 
+               color = "black", linewidth = 0.8) +
+  stat_summary(fun = sum, aes(group = 1), geom = "point", 
+               color = "black", size = 1.3) +
+  
+  labs(title = "Female Disability Wage Gap",
+       y = "Percent difference in wages", x = "Year",
+       fill = "Component") +
+  scale_fill_manual(values = met.brewer("Thomas", 7)) + # Palette Options: Thomas, Tara, Signac, Homer2, Hiroshige, Derain
+  theme_linedraw() +
+  theme(text = element_text(family = "serif"))
+```
+
+```{r visualization-male}
+# Daly et al. (2017) style decomposition plot
+male_plot_df %>% 
+  ggplot(aes(x = factor(year), y = percent_diff, fill = component)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  # geom_hline(yintercept = 0, color = "black", linewidth = 0.3) + # x-axis line
+  
+  # line for total wage gap
+  stat_summary(fun = sum, aes(group = 1), geom = "line", 
+               color = "black", linewidth = 0.8) +
+  stat_summary(fun = sum, aes(group = 1), geom = "point", 
+               color = "black", size = 1.3) +
+  
+  labs(title = "Male Disability Wage Gap",
+       y = "Percent difference in wages", x = "Year",
+       fill = "Component") +
+  scale_fill_manual(values = met.brewer("Thomas", 7)) + # Palette Options: Thomas, Tara, Signac, Homer2, Hiroshige, Derain
+  theme_linedraw() +
+  theme(text = element_text(family = "serif"))
+```
+
